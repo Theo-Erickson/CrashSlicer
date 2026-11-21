@@ -540,9 +540,11 @@ void MenuFactory::append_menu_item_snap_alignment(wxMenu* menu)
             for (const auto& kv : sel.get_content())
                 if ((size_t)kv.first < model.objects.size() && !model.objects[kv.first]->snap_alignment_enabled) { any_off = true; break; }
             // If any selected object is opted out, turn all on; otherwise turn all off.
+            plater()->take_snapshot(any_off ? "Enable snap alignment" : "Disable snap alignment");
             for (const auto& kv : sel.get_content())
                 if ((size_t)kv.first < model.objects.size())
                     model.objects[kv.first]->snap_alignment_enabled = any_off;
+            plater()->set_plater_dirty(true);
         }, nullptr,
         []() { return true; },
         []() -> bool {

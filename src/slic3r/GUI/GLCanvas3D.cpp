@@ -1130,6 +1130,12 @@ void GLCanvas3D::load_arrange_settings()
     m_arrange_settings_fff_seq_print.is_seq_print = true;
 }
 
+// Orca: the snap suppress key is limited to modifiers (0 = none) so it can be polled on all platforms.
+static bool is_snap_suppress_key(int kc)
+{
+    return kc == 0 || kc == WXK_ALT || kc == WXK_CONTROL || kc == WXK_SHIFT;
+}
+
 // Orca: alignment-snap settings, persisted under the "snap_align" AppConfig group.
 void GLCanvas3D::load_snap_settings()
 {
@@ -1151,6 +1157,8 @@ void GLCanvas3D::load_snap_settings()
     m_snap_settings.spacing_propagation = getb("spacing_propagation", true);
     m_snap_advanced_mode                = getb("advanced_mode", false);
     m_snap_suppress_key                 = (int)getf("suppress_keycode", (double)WXK_ALT);
+    if (!is_snap_suppress_key(m_snap_suppress_key))
+        m_snap_suppress_key = WXK_ALT;
     auto hex_to_col = [&](const char* k, float c[4]) {
         std::string s = cfg->get("snap_align", k);
         if (s.size() < 8) return;
@@ -3760,14 +3768,17 @@ public:
 void GLCanvas3D::on_key(wxKeyEvent& evt)
 {
     // Orca: capture a custom snap suppress key while the panel is listening.
+    // Only modifiers are accepted: wxGetKeyState() can't poll other keys on every platform (wxGTK).
     if (m_snap_listening_key && evt.GetEventType() == wxEVT_KEY_DOWN) {
         const int kc = evt.GetKeyCode();
-        m_snap_listening_key = false;
-        if (kc != WXK_ESCAPE) {
-            m_snap_suppress_key = kc;
-            save_snap_settings();
+        if (kc == WXK_ESCAPE || is_snap_suppress_key(kc)) {
+            m_snap_listening_key = false;
+            if (kc != WXK_ESCAPE) {
+                m_snap_suppress_key = kc;
+                save_snap_settings();
+            }
+            m_dirty = true;
         }
-        m_dirty = true;
         return;
     }
 
@@ -4640,14 +4651,14 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                                 const BoundingBoxf3 sel_bb = m_selection.get_bounding_box();
                                 m_snap_mover_start = BoundingBoxf(Vec2d(sel_bb.min.x(), sel_bb.min.y()),
                                                                   Vec2d(sel_bb.max.x(), sel_bb.max.y()));
-                                std::set<unsigned int> selected_objs;
-                                for (const auto& kv : m_selection.get_content())
-                                    selected_objs.insert(kv.first);
+                                const Selection::ObjectIdxsToInstanceIdxsMap& sel_content = m_selection.get_content();
                                 for (int oi = 0; oi < (int)m_model->objects.size(); ++oi) {
-                                    if (selected_objs.count((unsigned int)oi)) continue; // don't snap to self
                                     ModelObject* mo = m_model->objects[oi];
                                     if (mo == nullptr || !mo->snap_alignment_enabled) continue;
+                                    const auto sel_it = sel_content.find(oi);
                                     for (size_t ii = 0; ii < mo->instances.size(); ++ii) {
+                                        // Don't snap to the instances being dragged; sibling instances stay targets.
+                                        if (sel_it != sel_content.end() && sel_it->second.count((int)ii)) continue;
                                         BoundingBoxf3 bb = mo->instance_bounding_box(ii, false);
                                         m_snap_neighbors.push_back(AlignmentSnap::Neighbor{
                                             BoundingBoxf(Vec2d(bb.min.x(), bb.min.y()), Vec2d(bb.max.x(), bb.max.y())), oi });
@@ -6224,10 +6235,10 @@ bool GLCanvas3D::_render_snap_menu(float left, float right, float bottom, float 
         ImGui::AlignTextToFramePadding();
         imgui->text(_L("Suppress key"));
         ImGui::SameLine();
-        const std::string key_btn = (m_snap_listening_key ? _u8L("Press a key... (Esc cancels)") : key_name(m_snap_suppress_key)) + "##snapsetkey";
+        const std::string key_btn = (m_snap_listening_key ? _u8L("Press Alt, Ctrl or Shift... (Esc cancels)") : key_name(m_snap_suppress_key)) + "##snapsetkey";
         if (ImGui::Button(key_btn.c_str()) && en)
             m_snap_listening_key = !m_snap_listening_key;
-        tip(_utf8(L("Click, then press any key to bind it. Hold that key while dragging to bypass snapping.")));
+        tip(_utf8(L("Click, then press Alt, Ctrl or Shift to bind it. Hold that key while dragging to bypass snapping.")));
         ImGui::SameLine();
         if (ImGui::Button((_u8L("None") + "##snapnonekey").c_str()) && en) {
             m_snap_suppress_key = 0; m_snap_listening_key = false; dirty = true;

@@ -5,6 +5,7 @@
 namespace Slic3r { namespace AlignmentSnap {
 
 namespace {
+    enum MoverKey { KeyLo = 0, KeyHi = 1, KeyCenter = 2 };
     struct Cand { double correction; double dist_px; };
     inline double lo (const BoundingBoxf& b, int a){ return a == 0 ? b.min.x() : b.min.y(); }
     inline double hi (const BoundingBoxf& b, int a){ return a == 0 ? b.max.x() : b.max.y(); }
@@ -51,17 +52,12 @@ SnapResult compute_snap(const BoundingBoxf& mover_start,
         const double mover_c  = ctr(mover, a);
 
         // If this axis was already engaged, honour the wider break-away window first (hysteresis).
+        const double keys[3] = { mover_lo, mover_hi, mover_c };
         if (state.engaged[a]) {
-            const double d = std::min({ std::abs(state.coord[a] - mover_lo),
-                                        std::abs(state.coord[a] - mover_hi),
-                                        std::abs(state.coord[a] - mover_c) });
-            if (d * px_per_mm <= s.sensitivity_px + s.strength_px) {
-                // Stay snapped: correct whichever mover key sits closest to the engaged line.
-                const double keys[3] = { mover_lo, mover_hi, mover_c };
-                double bestc = state.coord[a] - keys[0];
-                for (double k : keys)
-                    if (std::abs(state.coord[a] - k) < std::abs(bestc))
-                        bestc = state.coord[a] - k;
+            // Stay snapped on the same mover key (edge or center) that engaged, so a narrow
+            // object can't hop from its center to an edge while the snap is held.
+            const double bestc = state.coord[a] - keys[state.key[a]];
+            if (std::abs(bestc) * px_per_mm <= s.sensitivity_px + s.strength_px) {
                 if (a == 0) r.corrected_delta.x() += bestc; else r.corrected_delta.y() += bestc;
                 r.engaged[a] = true;
                 continue;
@@ -74,26 +70,28 @@ SnapResult compute_snap(const BoundingBoxf& mover_start,
         Cand   best { 0.0, s.sensitivity_px + 1.0 };
         bool   found = false;
         double engaged_line = 0.0;
+        int    engaged_key  = KeyLo;
         for (const Neighbor& n : targets) {
-            auto consider = [&](double mover_key, double target_key) {
-                const double correction = target_key - mover_key;   // mm to add on this axis
+            auto consider = [&](int mover_key, double target_key) {
+                const double correction = target_key - keys[mover_key]; // mm to add on this axis
                 const double dpx        = std::abs(correction) * px_per_mm;
                 if (dpx <= s.sensitivity_px && dpx < best.dist_px) {
                     best = { correction, dpx };
                     found = true;
                     engaged_line = target_key;
+                    engaged_key  = mover_key;
                 }
             };
             if (s.edge_align) {
-                consider(mover_lo, lo(n.bbox, a)); // min <-> min
-                consider(mover_hi, hi(n.bbox, a)); // max <-> max
+                consider(KeyLo, lo(n.bbox, a)); // min <-> min
+                consider(KeyHi, hi(n.bbox, a)); // max <-> max
             }
             if (s.center_align) {
-                consider(mover_c, ctr(n.bbox, a)); // center <-> center
+                consider(KeyCenter, ctr(n.bbox, a)); // center <-> center
             }
             if (s.contact && overlaps_perp(mover, n.bbox, a)) {
-                consider(mover_hi, lo(n.bbox, a)); // mover max touches target min
-                consider(mover_lo, hi(n.bbox, a)); // mover min touches target max
+                consider(KeyHi, lo(n.bbox, a)); // mover max touches target min
+                consider(KeyLo, hi(n.bbox, a)); // mover min touches target max
             }
         }
         if (found) {
@@ -101,52 +99,79 @@ SnapResult compute_snap(const BoundingBoxf& mover_start,
             r.engaged[a]          = true;
             state.engaged[a]      = true;
             state.coord[a]        = engaged_line;
+            state.key[a]          = engaged_key;
             state.from_spacing[a] = false; // a hard edge/center/contact snap, not a row
             state.badge_cache[a].clear();
         }
     }
 
-    // Spacing propagation: continue an existing evenly spaced, aligned row.
+    // Spacing propagation: continue an existing evenly spaced, aligned row at either end.
     if (s.spacing_propagation) {
+        std::vector<const Neighbor*> row;
+        row.reserve(targets.size());
+        for (const Neighbor& n : targets) row.push_back(&n);
+
         for (int a = 0; a < 2; ++a) {
             if (r.engaged[a]) continue; // don't override a hard alignment
 
-            std::vector<const Neighbor*> row;
-            row.reserve(targets.size());
-            for (const Neighbor& n : targets) row.push_back(&n);
+            // Mover at its current position (the other axis may already be snapped this frame).
+            BoundingBoxf cur = mover_start;
+            cur.min += r.corrected_delta;
+            cur.max += r.corrected_delta;
+            const double half    = 0.5 * (hi(cur, a) - lo(cur, a));
+            const double mover_c = ctr(cur, a);
+
+            // A slot is usable only if the mover placed there would not overlap another object.
+            auto slot_free = [&](double slot) {
+                for (const Neighbor& n : targets)
+                    if (overlaps_perp(cur, n.bbox, a) && lo(n.bbox, a) < slot + half - EPSILON && slot - half + EPSILON < hi(n.bbox, a))
+                        return false;
+                return true;
+            };
+
             std::sort(row.begin(), row.end(), [&](const Neighbor* p, const Neighbor* q) {
                 return ctr(p->bbox, a) < ctr(q->bbox, a);
             });
 
+            double best_dpx  = s.sensitivity_px + 1.0;
+            double best_slot = 0.0;
+            std::vector<SpacingBadge> best_badges;
             for (size_t i = 0; i + 1 < row.size(); ++i) {
-                if (!perp_aligned(row[i]->bbox, row[i + 1]->bbox, a, thresh_mm)) continue;
-                const double spacing = ctr(row[i + 1]->bbox, a) - ctr(row[i]->bbox, a);
+                const BoundingBoxf& b0 = row[i]->bbox;
+                const BoundingBoxf& b1 = row[i + 1]->bbox;
+                if (!perp_aligned(b0, b1, a, thresh_mm)) continue;
+                // The mover must sit in the row's band, not in some other row far away.
+                if (!overlaps_perp(cur, b0, a) && !overlaps_perp(cur, b1, a)) continue;
+                const double c0 = ctr(b0, a), c1 = ctr(b1, a);
+                const double spacing = c1 - c0;
                 if (spacing <= thresh_mm) continue;
 
-                const double slot    = ctr(row[i + 1]->bbox, a) + spacing; // next slot beyond the row
-                const double mover_c = (a == 0 ? mover.center().x() : mover.center().y());
-                if (std::abs(slot - mover_c) * px_per_mm <= s.sensitivity_px) {
-                    const double correction = slot - mover_c;
-                    if (a == 0) r.corrected_delta.x() += correction; else r.corrected_delta.y() += correction;
-                    r.engaged[a]          = true;
-                    state.engaged[a]      = true;
-                    state.coord[a]        = slot;
-                    state.from_spacing[a] = true;
-
-                    // Cache badges (existing gap, then the new gap) so they persist every frame
-                    // the row snap is held; emitted from the cache in the guide phase below.
-                    state.badge_cache[a].clear();
-                    if (a == 0) {
-                        const double y = ctr(row[i]->bbox, 1);
-                        state.badge_cache[a].push_back(SpacingBadge{ Vec2d(ctr(row[i]->bbox, 0), y),     Vec2d(ctr(row[i + 1]->bbox, 0), y), spacing });
-                        state.badge_cache[a].push_back(SpacingBadge{ Vec2d(ctr(row[i + 1]->bbox, 0), y), Vec2d(slot, y),                     spacing });
-                    } else {
-                        const double x = ctr(row[i]->bbox, 0);
-                        state.badge_cache[a].push_back(SpacingBadge{ Vec2d(x, ctr(row[i]->bbox, 1)),     Vec2d(x, ctr(row[i + 1]->bbox, 1)), spacing });
-                        state.badge_cache[a].push_back(SpacingBadge{ Vec2d(x, ctr(row[i + 1]->bbox, 1)), Vec2d(x, slot),                     spacing });
-                    }
-                    break;
+                const double perp = ctr(b0, a ^ 1);
+                auto pt = [&](double along) { return a == 0 ? Vec2d(along, perp) : Vec2d(perp, along); };
+                const double slots[2] = { c1 + spacing, c0 - spacing }; // after the pair, before it
+                for (int k = 0; k < 2; ++k) {
+                    const double dpx = std::abs(slots[k] - mover_c) * px_per_mm;
+                    if (dpx > s.sensitivity_px || dpx >= best_dpx || !slot_free(slots[k])) continue;
+                    best_dpx  = dpx;
+                    best_slot = slots[k];
+                    // Badges show the existing gap, then the new one.
+                    if (k == 0)
+                        best_badges = { SpacingBadge{ pt(c0), pt(c1), spacing }, SpacingBadge{ pt(c1), pt(slots[k]), spacing } };
+                    else
+                        best_badges = { SpacingBadge{ pt(slots[k]), pt(c0), spacing }, SpacingBadge{ pt(c0), pt(c1), spacing } };
                 }
+            }
+
+            if (best_dpx <= s.sensitivity_px) {
+                const double correction = best_slot - mover_c;
+                if (a == 0) r.corrected_delta.x() += correction; else r.corrected_delta.y() += correction;
+                r.engaged[a]          = true;
+                state.engaged[a]      = true;
+                state.coord[a]        = best_slot;
+                state.key[a]          = KeyCenter;
+                state.from_spacing[a] = true;
+                // Cached so the badges persist every frame the row snap is held.
+                state.badge_cache[a]  = std::move(best_badges);
             }
         }
     }

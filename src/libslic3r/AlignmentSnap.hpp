@@ -36,6 +36,7 @@ struct SnapResult {
 struct SnapState {
     bool   engaged[2]      = { false, false };
     double coord[2]        = { 0.0, 0.0 };
+    int    key[2]          = { 0, 0 };   // mover key that engaged: 0 = min edge, 1 = max edge, 2 = center
     // Row-spacing engagements cache their badges so they persist across frames
     // (including while the snap is held via hysteresis), instead of vanishing after
     // the frame that first engaged them.

@@ -216,3 +216,54 @@ TEST_CASE("row propagation requires perpendicular alignment", "[AlignmentSnap]")
     REQUIRE_FALSE(r.engaged[0]);
     REQUIRE_THAT(r.corrected_delta.x(), WithinAbs(38.0, 1e-6));
 }
+
+// ---- Review fixes -----------------------------------------------------------
+
+TEST_CASE("held center snap keeps the center, not the nearest edge", "[AlignmentSnap]") {
+    SnapSettings s; s.enabled = true; s.sensitivity_px = 5.0; s.strength_px = 6.0;
+    s.edge_align = false; s.contact = false; s.spacing_propagation = false;
+    SnapState st;
+    // Narrow mover (width 2, center 1); target center at x=50.
+    std::vector<Neighbor> t = { { box(45,40,55,50), 1 } };
+    SnapResult r1 = compute_snap(box(0,0,2,2), Vec2d(48.0, 0.0), t, s, 1.0, st); // center 49 -> 50
+    REQUIRE(r1.engaged[0]);
+    REQUIRE_THAT(r1.corrected_delta.x(), WithinAbs(49.0, 1e-6));
+    // Drift to center 53: the min edge (52) is now closer to 50, but the center must stay locked.
+    SnapResult r2 = compute_snap(box(0,0,2,2), Vec2d(52.0, 0.0), t, s, 1.0, st);
+    REQUIRE(r2.engaged[0]);
+    REQUIRE_THAT(r2.corrected_delta.x(), WithinAbs(49.0, 1e-6));
+}
+
+TEST_CASE("row spacing propagates before the first object too", "[AlignmentSnap]") {
+    SnapSettings s; s.enabled = true; s.sensitivity_px = 5.0;
+    s.edge_align = false; s.center_align = false; s.contact = false;
+    SnapState st;
+    // Row centers at 45 and 65 (spacing 20): the slot before the row is center 25.
+    std::vector<Neighbor> t = { { box(40,0,50,10), 1 }, { box(60,0,70,10), 2 } };
+    SnapResult r = compute_snap(box(0,0,10,10), Vec2d(22.0, 0.0), t, s, 1.0, st); // center 27
+    REQUIRE(r.engaged[0]);
+    REQUIRE_THAT(r.corrected_delta.x(), WithinAbs(20.0, 1e-6)); // center -> 25
+    REQUIRE(r.badges.size() == 2);
+}
+
+TEST_CASE("row propagation ignores a row the mover is not in", "[AlignmentSnap]") {
+    SnapSettings s; s.enabled = true; s.sensitivity_px = 5.0;
+    s.edge_align = false; s.center_align = false; s.contact = false;
+    SnapState st;
+    // The row sits at y 0..10; the mover is dragged far away at y 100..110.
+    std::vector<Neighbor> t = { { box(0,0,10,10), 1 }, { box(20,0,30,10), 2 } };
+    SnapResult r = compute_snap(box(0,100,10,110), Vec2d(38.0, 0.0), t, s, 1.0, st);
+    REQUIRE_FALSE(r.engaged[0]);
+    REQUIRE_THAT(r.corrected_delta.x(), WithinAbs(38.0, 1e-6));
+}
+
+TEST_CASE("row propagation skips a slot that is already occupied", "[AlignmentSnap]") {
+    SnapSettings s; s.enabled = true; s.sensitivity_px = 5.0;
+    s.edge_align = false; s.center_align = false; s.contact = false;
+    SnapState st;
+    // Three evenly spaced objects (centers 5, 25, 45): the first pair's next slot (45) is taken.
+    std::vector<Neighbor> t = { { box(0,0,10,10), 1 }, { box(20,0,30,10), 2 }, { box(40,0,50,10), 3 } };
+    SnapResult r = compute_snap(box(0,0,10,10), Vec2d(41.0, 0.0), t, s, 1.0, st); // center 46
+    REQUIRE_FALSE(r.engaged[0]);
+    REQUIRE_THAT(r.corrected_delta.x(), WithinAbs(41.0, 1e-6));
+}

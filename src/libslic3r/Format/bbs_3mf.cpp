@@ -2126,6 +2126,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     //BBS: add module name
                     else if (metadata.key == "module")
                         model_object->module_name = metadata.value;
+                    // Orca: alignment-snap opt-out (absent key => enabled).
+                    else if (metadata.key == "snap_alignment_enabled")
+                        model_object->snap_alignment_enabled = !(metadata.value == "0" || metadata.value == "false");
                     else
                         model_object->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
                 }
@@ -7805,6 +7808,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 //BBS: store object's module name
                 if (!obj->module_name.empty())
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"module\" " << VALUE_ATTR << "=\"" << xml_escape(obj->module_name) << "\"/>\n";
+
+                // Orca: alignment-snap opt-out, written only when disabled so default projects are unchanged.
+                if (!obj->snap_alignment_enabled)
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"snap_alignment_enabled\" " << VALUE_ATTR << "=\"0\"/>\n";
 
                 // stores object's config data
                 for (const std::string& key : obj->config.keys()) {
