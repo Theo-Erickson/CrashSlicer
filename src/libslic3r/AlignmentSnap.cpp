@@ -71,6 +71,8 @@ SnapResult compute_snap(const BoundingBoxf& mover_start,
         bool   found = false;
         double engaged_line = 0.0;
         int    engaged_key  = KeyLo;
+        bool   gap_won      = false;   // the winning candidate is a fixed-gap snap
+        SpacingBadge gap_badge {};
         for (const Neighbor& n : targets) {
             auto consider = [&](int mover_key, double target_key) {
                 const double correction = target_key - keys[mover_key]; // mm to add on this axis
@@ -80,7 +82,10 @@ SnapResult compute_snap(const BoundingBoxf& mover_start,
                     found = true;
                     engaged_line = target_key;
                     engaged_key  = mover_key;
+                    gap_won      = false;
+                    return true;
                 }
+                return false;
             };
             if (s.edge_align) {
                 consider(KeyLo, lo(n.bbox, a)); // min <-> min
@@ -93,6 +98,16 @@ SnapResult compute_snap(const BoundingBoxf& mover_start,
                 consider(KeyHi, lo(n.bbox, a)); // mover max touches target min
                 consider(KeyLo, hi(n.bbox, a)); // mover min touches target max
             }
+            if (s.gap_snap && s.gap_mm > 0.0 && overlaps_perp(mover, n.bbox, a)) {
+                // Badge spans the gap, at the middle of the edges' shared perpendicular range.
+                const int    p    = a ^ 1;
+                const double perp = 0.5 * (std::max(lo(mover, p), lo(n.bbox, p)) + std::min(hi(mover, p), hi(n.bbox, p)));
+                auto pt = [&](double along) { return a == 0 ? Vec2d(along, perp) : Vec2d(perp, along); };
+                const double before = lo(n.bbox, a) - s.gap_mm; // mover sits before the target
+                const double after  = hi(n.bbox, a) + s.gap_mm; // mover sits after the target
+                if (consider(KeyHi, before)) { gap_won = true; gap_badge = { pt(before), pt(lo(n.bbox, a)), s.gap_mm }; }
+                if (consider(KeyLo, after))  { gap_won = true; gap_badge = { pt(hi(n.bbox, a)), pt(after), s.gap_mm }; }
+            }
         }
         if (found) {
             if (a == 0) r.corrected_delta.x() += best.correction; else r.corrected_delta.y() += best.correction;
@@ -100,8 +115,11 @@ SnapResult compute_snap(const BoundingBoxf& mover_start,
             state.engaged[a]      = true;
             state.coord[a]        = engaged_line;
             state.key[a]          = engaged_key;
-            state.from_spacing[a] = false; // a hard edge/center/contact snap, not a row
+            // Only a fixed-gap snap shows a badge; edge/center/contact snaps don't.
+            state.from_spacing[a] = gap_won;
             state.badge_cache[a].clear();
+            if (gap_won)
+                state.badge_cache[a].push_back(gap_badge);
         }
     }
 

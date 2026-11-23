@@ -267,3 +267,50 @@ TEST_CASE("row propagation skips a slot that is already occupied", "[AlignmentSn
     REQUIRE_FALSE(r.engaged[0]);
     REQUIRE_THAT(r.corrected_delta.x(), WithinAbs(41.0, 1e-6));
 }
+
+// ---- Fixed gap -------------------------------------------------------------
+
+TEST_CASE("fixed gap snaps facing edges the set distance apart", "[AlignmentSnap]") {
+    SnapSettings s; s.enabled = true; s.sensitivity_px = 5.0;
+    s.edge_align = false; s.center_align = false; s.contact = false; s.spacing_propagation = false;
+    s.gap_snap = true; s.gap_mm = 5.0;
+    SnapState st;
+    // Target x[30..40]; mover x[0..10] dragged +17 -> right edge 27, gap slot at 25 -> correction -2.
+    std::vector<Neighbor> t = { { box(30,0,40,10), 1 } };
+    SnapResult r = compute_snap(box(0,0,10,10), Vec2d(17.0, 0.0), t, s, 1.0, st);
+    REQUIRE(r.engaged[0]);
+    REQUIRE_THAT(r.corrected_delta.x(), WithinAbs(15.0, 1e-6)); // right edge -> 25
+    REQUIRE(r.badges.size() == 1);
+    REQUIRE_THAT(r.badges[0].value_mm, WithinAbs(5.0, 1e-6));
+}
+
+TEST_CASE("fixed gap works on the far side of the target", "[AlignmentSnap]") {
+    SnapSettings s; s.enabled = true; s.sensitivity_px = 5.0;
+    s.edge_align = false; s.center_align = false; s.contact = false; s.spacing_propagation = false;
+    s.gap_snap = true; s.gap_mm = 3.0;
+    SnapState st;
+    // Target x[0..10]; mover x[0..10] dragged +14 -> left edge 14, gap slot at 13 -> correction -1.
+    std::vector<Neighbor> t = { { box(0,0,10,10), 1 } };
+    SnapResult r = compute_snap(box(0,0,10,10), Vec2d(14.0, 0.0), t, s, 1.0, st);
+    REQUIRE(r.engaged[0]);
+    REQUIRE_THAT(r.corrected_delta.x(), WithinAbs(13.0, 1e-6));
+}
+
+TEST_CASE("fixed gap needs the objects to face each other", "[AlignmentSnap]") {
+    SnapSettings s; s.enabled = true; s.sensitivity_px = 5.0;
+    s.edge_align = false; s.center_align = false; s.contact = false; s.spacing_propagation = false;
+    s.gap_snap = true; s.gap_mm = 5.0;
+    SnapState st;
+    std::vector<Neighbor> t = { { box(30,80,40,90), 1 } }; // far away in Y
+    SnapResult r = compute_snap(box(0,0,10,10), Vec2d(17.0, 0.0), t, s, 1.0, st);
+    REQUIRE_FALSE(r.engaged[0]);
+}
+
+TEST_CASE("fixed gap is off by default", "[AlignmentSnap]") {
+    SnapSettings s; s.enabled = true; s.sensitivity_px = 5.0;
+    s.edge_align = false; s.center_align = false; s.contact = false; s.spacing_propagation = false;
+    SnapState st;
+    std::vector<Neighbor> t = { { box(30,0,40,10), 1 } };
+    SnapResult r = compute_snap(box(0,0,10,10), Vec2d(17.0, 0.0), t, s, 1.0, st);
+    REQUIRE_FALSE(r.engaged[0]);
+}

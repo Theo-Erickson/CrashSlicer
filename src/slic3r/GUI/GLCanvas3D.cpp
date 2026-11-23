@@ -1155,6 +1155,8 @@ void GLCanvas3D::load_snap_settings()
     m_snap_settings.center_align        = getb("center_align", true);
     m_snap_settings.contact             = getb("contact", true);
     m_snap_settings.spacing_propagation = getb("spacing_propagation", true);
+    m_snap_settings.gap_snap            = getb("gap_snap", false);
+    m_snap_settings.gap_mm              = std::max(0.5, getf("gap_mm", 5.0));
     m_snap_advanced_mode                = getb("advanced_mode", false);
     m_snap_suppress_key                 = (int)getf("suppress_keycode", (double)WXK_ALT);
     if (!is_snap_suppress_key(m_snap_suppress_key))
@@ -1180,6 +1182,8 @@ void GLCanvas3D::save_snap_settings()
     cfg->set("snap_align", "center_align",        m_snap_settings.center_align ? "1" : "0");
     cfg->set("snap_align", "contact",             m_snap_settings.contact ? "1" : "0");
     cfg->set("snap_align", "spacing_propagation", m_snap_settings.spacing_propagation ? "1" : "0");
+    cfg->set("snap_align", "gap_snap",            m_snap_settings.gap_snap ? "1" : "0");
+    cfg->set("snap_align", "gap_mm",              float_to_string_decimal_point(m_snap_settings.gap_mm));
     cfg->set("snap_align", "advanced_mode",       m_snap_advanced_mode ? "1" : "0");
     cfg->set("snap_align", "suppress_keycode",    std::to_string(m_snap_suppress_key));
     auto col_to_hex = [](const float c[4]) {
@@ -6218,6 +6222,15 @@ bool GLCanvas3D::_render_snap_menu(float left, float right, float bottom, float 
         tip_img(_utf8(L("Snap when centers line up, so two objects share a common centerline.")), m_snap_tex_center);
         { bool v = m_snap_settings.contact;             if (imgui->bbl_checkbox(_L("Contact"), v)                 && en) { m_snap_settings.contact = v; dirty = true; } }
         tip_img(_utf8(L("Snap objects so their edges just touch, with no gap and no overlap.")), m_snap_tex_contact);
+        { bool v = m_snap_settings.gap_snap;            if (imgui->bbl_checkbox(_L("Fixed gap"), v)               && en) { m_snap_settings.gap_snap = v; dirty = true; } }
+        tip_img(_utf8(L("Snap facing edges so the objects sit exactly the gap below apart.")), m_snap_tex_contact);
+        if (m_snap_settings.gap_snap) {
+            float gap = (float)m_snap_settings.gap_mm;
+            if (imgui->slider_float(_L("Gap (mm)"), &gap, 0.5f, 50.0f, "%.1f") && en) {
+                m_snap_settings.gap_mm = std::max(0.5f, gap); dirty = true;
+            }
+            tip(_utf8(L("Distance kept between facing edges when the fixed-gap snap engages.")));
+        }
         { bool v = m_snap_settings.spacing_propagation; if (imgui->bbl_checkbox(_L("Propagate spacing (row)"), v) && en) { m_snap_settings.spacing_propagation = v; dirty = true; } }
         tip_img(_utf8(L("Detect an evenly spaced, aligned row of objects and snap the dragged one to continue the same spacing.")), m_snap_tex_row);
 

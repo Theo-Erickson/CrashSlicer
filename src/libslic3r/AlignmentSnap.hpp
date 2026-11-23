@@ -15,6 +15,8 @@ struct SnapSettings {
     bool   center_align        = true;
     bool   contact             = true;
     bool   spacing_propagation = true;
+    bool   gap_snap            = false; // snap facing edges exactly gap_mm apart
+    double gap_mm              = 5.0;
 };
 
 struct Neighbor { BoundingBoxf bbox; int id = -1; };
@@ -37,7 +39,7 @@ struct SnapState {
     bool   engaged[2]      = { false, false };
     double coord[2]        = { 0.0, 0.0 };
     int    key[2]          = { 0, 0 };   // mover key that engaged: 0 = min edge, 1 = max edge, 2 = center
-    // Row-spacing engagements cache their badges so they persist across frames
+    // Row-spacing and fixed-gap engagements cache their badges so they persist across frames
     // (including while the snap is held via hysteresis), instead of vanishing after
     // the frame that first engaged them.
     bool   from_spacing[2] = { false, false };
