@@ -649,6 +649,10 @@ private:
     AlignmentSnap::SnapResult   m_snap_guides;                // guides to draw for the current frame
     bool                        m_snap_fading = false;        // guides fading out after drag release
     std::chrono::steady_clock::time_point m_snap_fade_start;  // when the fade began
+    AlignmentSnap::TargetSet    m_snap_targets;               // rails/landing spots for the idle selection
+    BoundingBoxf                m_snap_targets_mover;         // selection XY bbox the targets were built for
+    int                         m_snap_hover_spot = -1;       // landing spot under the mouse, -1 = none
+    bool                        m_snap_swallow_left_up = false; // eat the release of a click that placed the object
 
     PrinterTechnology current_printer_technology() const;
 
@@ -1295,6 +1299,10 @@ private:
     void _render_sequential_clearance();
     // Orca: draw alignment-snap guides (lines, ghost boxes, spacing badges) during a drag.
     void render_snap_guides();
+    // Orca: draw rails/landing spots for the selected object while idle, and track the hovered spot.
+    void render_snap_targets();
+    // Orca: XY footprints of every snap-enabled instance except the selected ones.
+    std::vector<AlignmentSnap::Neighbor> collect_snap_neighbors() const;
 #if ENABLE_RENDER_SELECTION_CENTER
     void _render_selection_center() { m_selection.render_center(m_gizmos.is_dragging()); }
 #endif // ENABLE_RENDER_SELECTION_CENTER

@@ -17,6 +17,7 @@ struct SnapSettings {
     bool   spacing_propagation = true;
     bool   gap_snap            = false; // snap facing edges exactly gap_mm apart
     double gap_mm              = 5.0;
+    bool   show_targets        = true;  // show rails/landing spots for the idle selection
 };
 
 struct Neighbor { BoundingBoxf bbox; int id = -1; };
@@ -45,6 +46,24 @@ struct SnapState {
     bool   from_spacing[2] = { false, false };
     std::vector<SpacingBadge> badge_cache[2];
 };
+
+enum class SpotKind { Contact, Gap, Row };
+
+// An exact place the selected object can be put so it snaps to a neighbor.
+struct TargetSpot { BoundingBoxf footprint; SpotKind kind; int neighbor_id; };
+
+struct TargetSet {
+    std::vector<GuideLine>  rails; // lines along neighbor edges/centers the object can align on
+    std::vector<TargetSpot> spots; // exact landing footprints (contact, fixed gap, row slot)
+};
+
+// Where an idle (not dragged) object could go to align with its neighbors, using the same
+// snap types as compute_snap(). Only the max_neighbors nearest neighbors contribute rails and
+// contact/gap spots; spots that would overlap another object are left out.
+TargetSet list_targets(const BoundingBoxf& mover,
+                       const std::vector<Neighbor>& targets,
+                       const SnapSettings& s,
+                       size_t max_neighbors = 4);
 
 // Returns raw_delta corrected so the moved bbox snaps to targets, plus guides to draw.
 SnapResult compute_snap(const BoundingBoxf& mover_start,

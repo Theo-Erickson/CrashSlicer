@@ -1157,6 +1157,7 @@ void GLCanvas3D::load_snap_settings()
     m_snap_settings.spacing_propagation = getb("spacing_propagation", true);
     m_snap_settings.gap_snap            = getb("gap_snap", false);
     m_snap_settings.gap_mm              = std::max(0.5, getf("gap_mm", 5.0));
+    m_snap_settings.show_targets        = getb("show_targets", true);
     m_snap_advanced_mode                = getb("advanced_mode", false);
     m_snap_suppress_key                 = (int)getf("suppress_keycode", (double)WXK_ALT);
     if (!is_snap_suppress_key(m_snap_suppress_key))
@@ -1184,6 +1185,7 @@ void GLCanvas3D::save_snap_settings()
     cfg->set("snap_align", "spacing_propagation", m_snap_settings.spacing_propagation ? "1" : "0");
     cfg->set("snap_align", "gap_snap",            m_snap_settings.gap_snap ? "1" : "0");
     cfg->set("snap_align", "gap_mm",              float_to_string_decimal_point(m_snap_settings.gap_mm));
+    cfg->set("snap_align", "show_targets",        m_snap_settings.show_targets ? "1" : "0");
     cfg->set("snap_align", "advanced_mode",       m_snap_advanced_mode ? "1" : "0");
     cfg->set("snap_align", "suppress_keycode",    std::to_string(m_snap_suppress_key));
     auto col_to_hex = [](const float c[4]) {
@@ -2227,6 +2229,7 @@ void GLCanvas3D::render(bool only_init)
 
     // draw overlays
     _render_overlays();
+    render_snap_targets(); // Orca: rails/landing spots for the idle selection
     render_snap_guides(); // Orca: alignment-snap overlay (drawn within the active ImGui frame)
 
     const int current_fps = m_render_stats.get_fps_and_reset_if_needed();
@@ -4421,6 +4424,30 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         return;
     }
 
+    // Orca: alignment targets. Clicking a landing spot moves the selection there as one undo step;
+    // its button release is swallowed so it doesn't deselect the object or pick the plate.
+    if (evt.LeftUp() && m_snap_swallow_left_up) {
+        m_snap_swallow_left_up = false;
+        mouse_up_cleanup();
+        return;
+    }
+    if (evt.Moving() && !m_snap_targets.spots.empty())
+        m_dirty = true; // re-render so the hovered spot follows the mouse
+    if (evt.LeftDown() && m_snap_hover_spot >= 0 && m_snap_hover_spot < (int)m_snap_targets.spots.size()
+        && !ImGui::GetIO().WantCaptureMouse) {
+        const Vec2d d = m_snap_targets.spots[m_snap_hover_spot].footprint.min - m_snap_targets_mover.min;
+        m_selection.setup_cache();
+        TransformationType tt;
+        tt.set_relative();
+        tt.set_world();
+        m_selection.translate(Vec3d(d.x(), d.y(), 0.0), tt);
+        do_move(L("Move to alignment target"));
+        m_snap_hover_spot      = -1;
+        m_snap_swallow_left_up = true;
+        m_dirty                = true;
+        return;
+    }
+
     // BBS
 #if 0
     if (wxGetApp().plater()->get_view_toolbar().on_mouse(evt, *this)) {
@@ -4655,19 +4682,7 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                                 const BoundingBoxf3 sel_bb = m_selection.get_bounding_box();
                                 m_snap_mover_start = BoundingBoxf(Vec2d(sel_bb.min.x(), sel_bb.min.y()),
                                                                   Vec2d(sel_bb.max.x(), sel_bb.max.y()));
-                                const Selection::ObjectIdxsToInstanceIdxsMap& sel_content = m_selection.get_content();
-                                for (int oi = 0; oi < (int)m_model->objects.size(); ++oi) {
-                                    ModelObject* mo = m_model->objects[oi];
-                                    if (mo == nullptr || !mo->snap_alignment_enabled) continue;
-                                    const auto sel_it = sel_content.find(oi);
-                                    for (size_t ii = 0; ii < mo->instances.size(); ++ii) {
-                                        // Don't snap to the instances being dragged; sibling instances stay targets.
-                                        if (sel_it != sel_content.end() && sel_it->second.count((int)ii)) continue;
-                                        BoundingBoxf3 bb = mo->instance_bounding_box(ii, false);
-                                        m_snap_neighbors.push_back(AlignmentSnap::Neighbor{
-                                            BoundingBoxf(Vec2d(bb.min.x(), bb.min.y()), Vec2d(bb.max.x(), bb.max.y())), oi });
-                                    }
-                                }
+                                m_snap_neighbors = collect_snap_neighbors();
                             }
                         }
                     }
@@ -6202,6 +6217,8 @@ bool GLCanvas3D::_render_snap_menu(float left, float right, float bottom, float 
         ImGui::EndCombo();
     }
     tip(_utf8(L("Quick presets that set which snap types are active. Editing an individual type (advanced mode) shows 'Custom'.")));
+    { bool v = m_snap_settings.show_targets; if (imgui->bbl_checkbox(_L("Show alignment targets"), v) && en) { m_snap_settings.show_targets = v; dirty = true; } }
+    tip(_utf8(L("When one object is selected, show where it can go to align with its neighbors.\nClick a dotted outline to move the object there.")));
 
     if (m_snap_advanced_mode) {
         ImGui::Separator();
@@ -6281,6 +6298,121 @@ bool GLCanvas3D::_render_snap_menu(float left, float right, float bottom, float 
 
 // Orca: draw alignment-snap guides for the active drag as a screen-space overlay.
 // Colors/thickness live here in one place so restyling is a one-line change.
+std::vector<AlignmentSnap::Neighbor> GLCanvas3D::collect_snap_neighbors() const
+{
+    std::vector<AlignmentSnap::Neighbor> out;
+    if (m_model == nullptr)
+        return out;
+    const Selection::ObjectIdxsToInstanceIdxsMap& sel_content = m_selection.get_content();
+    for (int oi = 0; oi < (int)m_model->objects.size(); ++oi) {
+        const ModelObject* mo = m_model->objects[oi];
+        if (mo == nullptr || !mo->snap_alignment_enabled) continue;
+        const auto sel_it = sel_content.find(oi);
+        for (size_t ii = 0; ii < mo->instances.size(); ++ii) {
+            // Skip the selected instances; sibling instances stay targets.
+            if (sel_it != sel_content.end() && sel_it->second.count((int)ii)) continue;
+            const BoundingBoxf3 bb = mo->instance_bounding_box(ii, false);
+            out.push_back(AlignmentSnap::Neighbor{ BoundingBoxf(Vec2d(bb.min.x(), bb.min.y()), Vec2d(bb.max.x(), bb.max.y())), oi });
+        }
+    }
+    return out;
+}
+
+void GLCanvas3D::render_snap_targets()
+{
+    const bool show = m_snap_settings.enabled && m_snap_settings.show_targets && m_model != nullptr
+        && m_canvas_type == ECanvasType::CanvasView3D && m_gizmos.get_current_type() == GLGizmosManager::Undefined
+        && !m_mouse.dragging && !m_moving && !is_layers_editing_enabled() && m_selection.is_single_full_instance();
+    if (!show) {
+        m_snap_targets    = AlignmentSnap::TargetSet{};
+        m_snap_hover_spot = -1;
+        return;
+    }
+
+    const BoundingBoxf3 sel_bb = m_selection.get_bounding_box();
+    m_snap_targets_mover = BoundingBoxf(Vec2d(sel_bb.min.x(), sel_bb.min.y()), Vec2d(sel_bb.max.x(), sel_bb.max.y()));
+    m_snap_targets       = AlignmentSnap::list_targets(m_snap_targets_mover, collect_snap_neighbors(), m_snap_settings);
+
+    // Drop landing spots that fall off the bed.
+    const BoundingBoxf bed = m_bed.build_volume().bounding_volume2d();
+    auto& spots = m_snap_targets.spots;
+    spots.erase(std::remove_if(spots.begin(), spots.end(), [&bed](const AlignmentSnap::TargetSpot& sp) {
+        return sp.footprint.min.x() < bed.min.x() - EPSILON || sp.footprint.min.y() < bed.min.y() - EPSILON
+            || sp.footprint.max.x() > bed.max.x() + EPSILON || sp.footprint.max.y() > bed.max.y() + EPSILON;
+    }), spots.end());
+
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    auto to_screen = [&](double x, double y) -> ImVec2 {
+        const Slic3r::Point p = CameraUtils::project(camera, Vec3d(x, y, 0.0));
+        return ImVec2((float)p.x(), (float)p.y());
+    };
+    auto with_alpha = [](const float c[4], float k) {
+        return ImGui::ColorConvertFloat4ToU32(ImVec4(c[0], c[1], c[2], c[3] * k));
+    };
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    // ImDrawList has no dashed lines, so dash in screen space.
+    auto dashed = [dl](ImVec2 a, ImVec2 b, ImU32 col, float w) {
+        const float dx = b.x - a.x, dy = b.y - a.y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 1.0f) return;
+        const float dash = 6.0f, gap = 4.0f;
+        for (float t = 0.0f; t < len; t += dash + gap) {
+            const float t1 = std::min(t + dash, len);
+            dl->AddLine(ImVec2(a.x + dx * t / len, a.y + dy * t / len), ImVec2(a.x + dx * t1 / len, a.y + dy * t1 / len), col, w);
+        }
+    };
+
+    for (const AlignmentSnap::GuideLine& g : m_snap_targets.rails) {
+        const bool x = g.axis == AlignmentSnap::Axis::X;
+        dashed(x ? to_screen(g.coord, g.span_lo) : to_screen(g.span_lo, g.coord),
+               x ? to_screen(g.coord, g.span_hi) : to_screen(g.span_hi, g.coord), with_alpha(m_snap_color_ghost, 0.6f), 1.0f);
+    }
+
+    // Hover: the spot whose projected footprint contains the mouse (projection keeps it convex).
+    const ImGuiIO& io = ImGui::GetIO();
+    m_snap_hover_spot = -1;
+    for (int i = 0; i < (int)spots.size(); ++i) {
+        const BoundingBoxf& f = spots[i].footprint;
+        const ImVec2 q[4] = { to_screen(f.min.x(), f.min.y()), to_screen(f.max.x(), f.min.y()),
+                              to_screen(f.max.x(), f.max.y()), to_screen(f.min.x(), f.max.y()) };
+        bool inside = !io.WantCaptureMouse;
+        int  sign   = 0;
+        for (int k = 0; k < 4 && inside; ++k) {
+            const ImVec2& a = q[k];
+            const ImVec2& b = q[(k + 1) % 4];
+            const float cross = (b.x - a.x) * (io.MousePos.y - a.y) - (b.y - a.y) * (io.MousePos.x - a.x);
+            const int s = cross > 0.0f ? 1 : (cross < 0.0f ? -1 : 0);
+            if (s != 0) {
+                if (sign != 0 && s != sign) inside = false;
+                sign = s;
+            }
+        }
+        if (inside && m_snap_hover_spot < 0)
+            m_snap_hover_spot = i;
+
+        const bool hovered = m_snap_hover_spot == i;
+        if (hovered) {
+            dl->AddQuadFilled(q[0], q[1], q[2], q[3], with_alpha(m_snap_color_line, 0.25f));
+            dl->AddQuad(q[0], q[1], q[2], q[3], with_alpha(m_snap_color_line, 1.0f), 2.0f);
+        } else
+            for (int k = 0; k < 4; ++k)
+                dashed(q[k], q[(k + 1) % 4], with_alpha(m_snap_color_line, 0.8f), 1.5f);
+    }
+
+    if (m_snap_hover_spot >= 0) {
+        const AlignmentSnap::TargetSpot& sp = spots[m_snap_hover_spot];
+        const std::string name = (sp.neighbor_id >= 0 && sp.neighbor_id < (int)m_model->objects.size())
+            ? m_model->objects[sp.neighbor_id]->name : std::string();
+        std::string what;
+        switch (sp.kind) {
+        case AlignmentSnap::SpotKind::Contact: what = (boost::format(_u8L("Touch %1%")) % name).str(); break;
+        case AlignmentSnap::SpotKind::Gap:     what = (boost::format(_u8L("%1% mm from %2%")) % float_to_string_decimal_point(m_snap_settings.gap_mm, 1) % name).str(); break;
+        case AlignmentSnap::SpotKind::Row:     what = _u8L("Continue the row"); break;
+        }
+        ImGui::SetTooltip("%s\n%s", what.c_str(), _u8L("(click to place)").c_str());
+    }
+}
+
 void GLCanvas3D::render_snap_guides()
 {
     static const float SNAP_LINE_WIDTH   = 2.0f;

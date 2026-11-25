@@ -226,4 +226,104 @@ SnapResult compute_snap(const BoundingBoxf& mover_start,
     return r;
 }
 
+TargetSet list_targets(const BoundingBoxf& mover,
+                       const std::vector<Neighbor>& targets,
+                       const SnapSettings& s,
+                       size_t max_neighbors)
+{
+    TargetSet out;
+    if (!s.enabled || targets.empty())
+        return out;
+
+    // Nearest neighbors by footprint distance.
+    auto dist2 = [&](const BoundingBoxf& b) {
+        const double dx = std::max({ 0.0, lo(b, 0) - hi(mover, 0), lo(mover, 0) - hi(b, 0) });
+        const double dy = std::max({ 0.0, lo(b, 1) - hi(mover, 1), lo(mover, 1) - hi(b, 1) });
+        return dx * dx + dy * dy;
+    };
+    std::vector<const Neighbor*> near;
+    for (const Neighbor& n : targets) near.push_back(&n);
+    std::sort(near.begin(), near.end(), [&](const Neighbor* p, const Neighbor* q) { return dist2(p->bbox) < dist2(q->bbox); });
+    if (near.size() > max_neighbors)
+        near.resize(max_neighbors);
+    auto is_near = [&](const Neighbor* n) { return std::find(near.begin(), near.end(), n) != near.end(); };
+
+    // Rails: one per distinct line, spanning the neighbors that share it and the object.
+    auto add_rail = [&](int a, double coord, const BoundingBoxf& n) {
+        const int    p  = a ^ 1;
+        const double s0 = std::min(lo(n, p), lo(mover, p));
+        const double s1 = std::max(hi(n, p), hi(mover, p));
+        for (GuideLine& g : out.rails)
+            if (static_cast<int>(g.axis) == a && std::abs(g.coord - coord) < EPSILON) {
+                g.span_lo = std::min(g.span_lo, s0);
+                g.span_hi = std::max(g.span_hi, s1);
+                return;
+            }
+        out.rails.push_back(GuideLine{ a == 0 ? Axis::X : Axis::Y, coord, s0, s1 });
+    };
+    for (const Neighbor* n : near)
+        for (int a = 0; a < 2; ++a) {
+            if (s.edge_align) { add_rail(a, lo(n->bbox, a), n->bbox); add_rail(a, hi(n->bbox, a), n->bbox); }
+            if (s.center_align) add_rail(a, ctr(n->bbox, a), n->bbox);
+        }
+
+    // Spots: the object's footprint centered at (cx, cy), kept only if it is a real move
+    // and doesn't overlap another object (touching is fine).
+    const Vec2d size = mover.size();
+    auto add_spot = [&](double cx, double cy, SpotKind kind, int id) {
+        const BoundingBoxf f(Vec2d(cx - 0.5 * size.x(), cy - 0.5 * size.y()), Vec2d(cx + 0.5 * size.x(), cy + 0.5 * size.y()));
+        if ((f.min - mover.min).norm() < EPSILON)
+            return;
+        for (const Neighbor& t : targets)
+            if (lo(f, 0) < hi(t.bbox, 0) - EPSILON && lo(t.bbox, 0) < hi(f, 0) - EPSILON &&
+                lo(f, 1) < hi(t.bbox, 1) - EPSILON && lo(t.bbox, 1) < hi(f, 1) - EPSILON)
+                return;
+        for (const TargetSpot& sp : out.spots)
+            if ((sp.footprint.min - f.min).norm() < EPSILON)
+                return;
+        out.spots.push_back(TargetSpot{ f, kind, id });
+    };
+    // Place along axis a at `along`, centered on `perp` across it.
+    auto add_at = [&](int a, double along, double perp, SpotKind kind, int id) {
+        if (a == 0) add_spot(along, perp, kind, id); else add_spot(perp, along, kind, id);
+    };
+
+    for (const Neighbor* n : near)
+        for (int a = 0; a < 2; ++a) {
+            const double half = 0.5 * (a == 0 ? size.x() : size.y());
+            const double perp = ctr(n->bbox, a ^ 1);
+            if (s.contact) {
+                add_at(a, lo(n->bbox, a) - half, perp, SpotKind::Contact, n->id);
+                add_at(a, hi(n->bbox, a) + half, perp, SpotKind::Contact, n->id);
+            }
+            if (s.gap_snap && s.gap_mm > 0.0) {
+                add_at(a, lo(n->bbox, a) - s.gap_mm - half, perp, SpotKind::Gap, n->id);
+                add_at(a, hi(n->bbox, a) + s.gap_mm + half, perp, SpotKind::Gap, n->id);
+            }
+        }
+
+    // Row slots at either end of each evenly spaced pair that includes a near neighbor.
+    if (s.spacing_propagation) {
+        const double tol = 0.5; // mm: how closely a pair must line up to count as a row
+        std::vector<const Neighbor*> row;
+        for (const Neighbor& n : targets) row.push_back(&n);
+        for (int a = 0; a < 2; ++a) {
+            std::sort(row.begin(), row.end(), [&](const Neighbor* p, const Neighbor* q) { return ctr(p->bbox, a) < ctr(q->bbox, a); });
+            for (size_t i = 0; i + 1 < row.size(); ++i) {
+                const Neighbor* n0 = row[i];
+                const Neighbor* n1 = row[i + 1];
+                if (!is_near(n0) && !is_near(n1)) continue;
+                if (!perp_aligned(n0->bbox, n1->bbox, a, tol)) continue;
+                const double c0 = ctr(n0->bbox, a), c1 = ctr(n1->bbox, a);
+                const double spacing = c1 - c0;
+                if (spacing <= tol) continue;
+                const double perp = ctr(n0->bbox, a ^ 1);
+                add_at(a, c1 + spacing, perp, SpotKind::Row, n1->id);
+                add_at(a, c0 - spacing, perp, SpotKind::Row, n0->id);
+            }
+        }
+    }
+    return out;
+}
+
 }} // namespace Slic3r::AlignmentSnap

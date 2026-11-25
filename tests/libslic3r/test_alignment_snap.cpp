@@ -314,3 +314,73 @@ TEST_CASE("fixed gap is off by default", "[AlignmentSnap]") {
     SnapResult r = compute_snap(box(0,0,10,10), Vec2d(17.0, 0.0), t, s, 1.0, st);
     REQUIRE_FALSE(r.engaged[0]);
 }
+
+// ---- Alignment targets for the idle selection -------------------------------
+
+static bool has_spot(const TargetSet& ts, double x0, double y0, double x1, double y1) {
+    for (const TargetSpot& sp : ts.spots)
+        if (std::abs(sp.footprint.min.x() - x0) < 1e-6 && std::abs(sp.footprint.min.y() - y0) < 1e-6 &&
+            std::abs(sp.footprint.max.x() - x1) < 1e-6 && std::abs(sp.footprint.max.y() - y1) < 1e-6)
+            return true;
+    return false;
+}
+
+TEST_CASE("targets are empty when snapping is off", "[AlignmentSnap]") {
+    SnapSettings s; s.enabled = false;
+    std::vector<Neighbor> t = { { box(30,0,40,10), 1 } };
+    TargetSet ts = list_targets(box(0,50,10,60), t, s);
+    REQUIRE(ts.rails.empty());
+    REQUIRE(ts.spots.empty());
+}
+
+TEST_CASE("rails follow a neighbor's edges and center", "[AlignmentSnap]") {
+    SnapSettings s; s.enabled = true; s.contact = false; s.spacing_propagation = false;
+    std::vector<Neighbor> t = { { box(30,0,40,10), 1 } };
+    TargetSet ts = list_targets(box(0,50,10,60), t, s);
+    REQUIRE(ts.rails.size() == 6); // min, max and center on each axis
+    REQUIRE(ts.spots.empty());
+}
+
+TEST_CASE("contact spots sit flush on each side, centered", "[AlignmentSnap]") {
+    SnapSettings s; s.enabled = true; s.edge_align = false; s.center_align = false; s.spacing_propagation = false;
+    std::vector<Neighbor> t = { { box(30,0,40,10), 1 } };
+    TargetSet ts = list_targets(box(0,50,10,60), t, s);
+    REQUIRE(ts.spots.size() == 4);
+    REQUIRE(has_spot(ts, 20,0, 30,10));   // left
+    REQUIRE(has_spot(ts, 40,0, 50,10));   // right
+    REQUIRE(has_spot(ts, 30,-10, 40,0));  // front
+    REQUIRE(has_spot(ts, 30,10, 40,20));  // back
+}
+
+TEST_CASE("gap spots keep the set distance", "[AlignmentSnap]") {
+    SnapSettings s; s.enabled = true; s.edge_align = false; s.center_align = false; s.contact = false;
+    s.spacing_propagation = false; s.gap_snap = true; s.gap_mm = 5.0;
+    std::vector<Neighbor> t = { { box(30,0,40,10), 1 } };
+    TargetSet ts = list_targets(box(0,50,10,60), t, s);
+    REQUIRE(has_spot(ts, 15,0, 25,10));
+    REQUIRE(has_spot(ts, 45,0, 55,10));
+}
+
+TEST_CASE("spots that would overlap another object are dropped", "[AlignmentSnap]") {
+    SnapSettings s; s.enabled = true; s.edge_align = false; s.center_align = false; s.spacing_propagation = false;
+    // A second object fills the slot left of the first.
+    std::vector<Neighbor> t = { { box(30,0,40,10), 1 }, { box(22,0,29,10), 2 } };
+    TargetSet ts = list_targets(box(0,50,10,60), t, s);
+    REQUIRE_FALSE(has_spot(ts, 20,0, 30,10));
+    REQUIRE(has_spot(ts, 40,0, 50,10));
+}
+
+TEST_CASE("row slots appear at both ends of an even row", "[AlignmentSnap]") {
+    SnapSettings s; s.enabled = true; s.edge_align = false; s.center_align = false; s.contact = false;
+    std::vector<Neighbor> t = { { box(0,0,10,10), 1 }, { box(20,0,30,10), 2 } };
+    TargetSet ts = list_targets(box(0,50,10,60), t, s);
+    REQUIRE(has_spot(ts, 40,0, 50,10));   // after: center 45
+    REQUIRE(has_spot(ts, -20,0, -10,10)); // before: center -15
+}
+
+TEST_CASE("only the nearest neighbors add rails", "[AlignmentSnap]") {
+    SnapSettings s; s.enabled = true; s.center_align = false; s.contact = false; s.spacing_propagation = false;
+    std::vector<Neighbor> t = { { box(20,0,30,10), 1 }, { box(500,500,513,517), 2 } };
+    TargetSet ts = list_targets(box(0,0,10,10), t, s, 1);
+    REQUIRE(ts.rails.size() == 4); // min and max on each axis, from the near neighbor only
+}
