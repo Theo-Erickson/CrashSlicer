@@ -6349,7 +6349,7 @@ void GLCanvas3D::render_snap_targets()
     auto with_alpha = [](const float c[4], float k) {
         return ImGui::ColorConvertFloat4ToU32(ImVec4(c[0], c[1], c[2], c[3] * k));
     };
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
     // ImDrawList has no dashed lines, so dash in screen space.
     auto dashed = [dl](ImVec2 a, ImVec2 b, ImU32 col, float w) {
         const float dx = b.x - a.x, dy = b.y - a.y;
@@ -6454,7 +6454,7 @@ void GLCanvas3D::render_snap_guides()
     const ImU32 badge_col = with_alpha(SNAP_BADGE_COLOR);
 
     const Camera& camera = wxGetApp().plater()->get_camera();
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
     auto to_screen = [&](double x, double y) -> ImVec2 {
         const Slic3r::Point p = CameraUtils::project(camera, Vec3d(x, y, 0.0));
         return ImVec2((float)p.x(), (float)p.y());
