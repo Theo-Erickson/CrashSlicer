@@ -1737,33 +1737,62 @@ void GizmoObjectManipulation::do_render_clipboard_window(ImGuiWrapper *imgui_wra
         return pressed && enabled;
     };
 
+    // Tooltip for the last item, also shown while it is disabled so a greyed-out
+    // paste button can explain why.
+    const float tip_width = ImGui::GetFontSize() * 18;
+    auto hover_tip = [&](const wxString &tip) {
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            imgui_wrapper->tooltip(tip, tip_width);
+    };
+
+    // Accent for "on" states (included axis chips, armed eyedropper): Orca teal,
+    // kept as a translucent tint so held values read as text, not as buttons.
+    const ImVec4 accent = ImGuiWrapper::COL_ORCA;
+    auto tint = [&](float alpha) { return ImVec4(accent.x, accent.y, accent.z, alpha); };
+
     // A toggleable axis chip showing a held value; toggling drives that row's
     // per-axis paste filter (index a = X/Y/Z), independent per component.
+    // Included axes get a faint teal tint; excluded ones drop to dimmed text.
     auto value_chip = [&](const char *slot, int a, double value) {
         std::array<bool, 3> &mask = c.axes_for(slot);
         const bool on = mask[a];
-        if (on) {
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.00f, 0.68f, 0.26f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.00f, 0.68f, 0.26f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.00f, 0.68f, 0.26f, 1.00f));
-        }
+        ImGui::PushStyleColor(ImGuiCol_Button,        on ? tint(0.22f) : ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on ? tint(0.35f) : tint(0.12f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  on ? tint(0.45f) : tint(0.20f));
+        if (!on)
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         ImGui::PushID(a);
         char buf[32];
         ImGui::DataTypeFormatString(buf, IM_ARRAYSIZE(buf), ImGuiDataType_Double, (void *) &value, "%.2f");
         if (ImGui::Button(buf))
             mask[a] = !mask[a];
         ImGui::PopID();
-        if (on)
-            ImGui::PopStyleColor(3);
+        ImGui::PopStyleColor(on ? 3 : 4);
+        static const char *axis_names[] = { "X", "Y", "Z" };
+        hover_tip(on ? wxString::Format(_L("%s is included when pasting. Click to leave it out."), axis_names[a])
+                     : wxString::Format(_L("%s is left out when pasting. Click to include it."), axis_names[a]));
     };
 
-    struct Row { wxString label; const char *slot; const std::optional<Vec3d> *val; double factor; };
+    struct Row {
+        wxString label; const char *slot; const std::optional<Vec3d> *val; double factor;
+        wxString tip, tip_copy, tip_paste;
+    };
     const Row rows[] = {
-        { _L("Position"), "position", &c.position,      1.0 },
-        { _L("Rotation"), "rotation", &c.rotation,      180.0 / M_PI },
-        { _L("Scale %"),  "scale",    &c.scale_factors, 100.0 },
-        { _L("Size mm"),  "size",     &c.size,          1.0 },
-        { _L("Mirror"),   "mirror",   &c.mirror,        1.0 },
+        { _L("Position"), "position", &c.position, 1.0,
+          _L("Where the object sits on the plate, in world coordinates (mm)."),
+          _L("Copy the selected object's position"), _L("Move the selected object to the held position") },
+        { _L("Rotation"), "rotation", &c.rotation, 180.0 / M_PI,
+          _L("The object's orientation in the world, in degrees."),
+          _L("Copy the selected object's rotation"), _L("Rotate the selected object to the held orientation") },
+        { _L("Scale %"), "scale", &c.scale_factors, 100.0,
+          _L("Scale factor per axis, as a percentage of the original model."),
+          _L("Copy the selected object's scale"), _L("Apply the held scale to the selected object") },
+        { _L("Size mm"), "size", &c.size, 1.0,
+          _L("Bounding box size per axis (mm). Best pasted between copies of the same model."),
+          _L("Copy the selected object's size"), _L("Resize the selected object to the held size") },
+        { _L("Mirror"), "mirror", &c.mirror, 1.0,
+          _L("Whether each axis is mirrored: 1 is normal, -1 is mirrored."),
+          _L("Copy the selected object's mirroring"), _L("Apply the held mirroring to the selected object") },
     };
     float label_max = 0.f;
     for (const auto &r : rows)
@@ -1783,12 +1812,16 @@ void GizmoObjectManipulation::do_render_clipboard_window(ImGuiWrapper *imgui_wra
         ImGui::PushID(r.slot);
         ImGui::AlignTextToFramePadding();
         imgui_wrapper->text(r.label);
+        hover_tip(r.tip);
         ImGui::SameLine(label_max + 2 * space_size);
         if (icon_button(GLGizmosManager::IC_TOOLBAR_COPY, true, "tc_copy"))
             clipboard_copy(r.slot);
+        hover_tip(r.tip_copy);
         ImGui::SameLine();
-        if (icon_button(GLGizmosManager::IC_TOOLBAR_PASTE, clipboard_slot_filled(r.slot), "tc_paste"))
+        const bool filled = clipboard_slot_filled(r.slot);
+        if (icon_button(GLGizmosManager::IC_TOOLBAR_PASTE, filled, "tc_paste"))
             clipboard_paste(r.slot);
+        hover_tip(filled ? r.tip_paste : _L("Nothing held yet. Copy a value first."));
         if (r.val->has_value()) {
             Vec3d shown = (**r.val) * r.factor;
             for (int a = 0; a < 3; ++a) {
@@ -1809,15 +1842,29 @@ void GizmoObjectManipulation::do_render_clipboard_window(ImGuiWrapper *imgui_wra
         if (const Row *r = find_row(slot))
             render_row(*r, "surf");
 
-    // The full transform clipboard, tucked under a collapsed dropdown.
-    if (ImGui::CollapsingHeader(into_u8(_L("Transform clipboard")).c_str())) {
+    // The full transform clipboard, tucked under a collapsed dropdown. The default
+    // header fill is the loud accent colour; use a faint neutral wash instead so
+    // the header reads as a section divider, not a button.
+    const bool   dark      = wxGetApp().dark_mode();
+    const ImVec4 header_bg = dark ? ImVec4(1.f, 1.f, 1.f, 0.06f) : ImVec4(0.f, 0.f, 0.f, 0.05f);
+    const ImVec4 header_hv = dark ? ImVec4(1.f, 1.f, 1.f, 0.12f) : ImVec4(0.f, 0.f, 0.f, 0.10f);
+    ImGui::PushStyleColor(ImGuiCol_Header,        header_bg);
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, header_hv);
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive,  header_hv);
+    const bool clipboard_open = ImGui::CollapsingHeader(into_u8(_L("Transform clipboard")).c_str());
+    ImGui::PopStyleColor(3);
+    hover_tip(_L("Copy a transform from one object and paste it onto another, in whole or per value."));
+
+    if (clipboard_open) {
         for (const auto &r : rows)
             render_row(r, "full");
 
         if (c.empty())
             imgui_wrapper->text(_L("Nothing copied yet."));
-        else
+        else {
             imgui_wrapper->text(into_u8(_L("Held from:")) + " " + c.source_label);
+            hover_tip(_L("The object the held values were copied from."));
+        }
 
         // Whole-transform bulk copy/paste and the two eyedroppers.
         ImGui::AlignTextToFramePadding();
@@ -1825,13 +1872,13 @@ void GizmoObjectManipulation::do_render_clipboard_window(ImGuiWrapper *imgui_wra
         ImGui::SameLine();
         if (icon_button(GLGizmosManager::IC_TOOLBAR_COPY, true, "tc_copy_all"))
             clipboard_copy("all");
-        if (ImGui::IsItemHovered())
-            imgui_wrapper->tooltip(_L("Copy the whole transform"), ImGui::GetFontSize() * 15);
+        hover_tip(_L("Copy the selected object's whole transform"));
         ImGui::SameLine();
-        if (icon_button(GLGizmosManager::IC_TOOLBAR_PASTE, clipboard_slot_filled("all"), "tc_paste_all"))
+        const bool any_held = clipboard_slot_filled("all");
+        if (icon_button(GLGizmosManager::IC_TOOLBAR_PASTE, any_held, "tc_paste_all"))
             clipboard_paste("all");
-        if (ImGui::IsItemHovered() && clipboard_slot_filled("all"))
-            imgui_wrapper->tooltip(_L("Paste the whole transform"), ImGui::GetFontSize() * 15);
+        hover_tip(any_held ? _L("Paste every held value onto the selected object, skipping left-out axes")
+                           : _L("Nothing held yet. Copy a value first."));
 
         // Two eyedroppers: "Pick apply" picks a donor and makes the selection like
         // it; "Copy from" only loads the clipboard from the picked object. Esc, a
@@ -1841,9 +1888,9 @@ void GizmoObjectManipulation::do_render_clipboard_window(ImGuiWrapper *imgui_wra
         const bool copy_on  = picking &&  m_tc_eyedropper_copy_only;
         auto pick_button = [&](bool active, const std::string &text, const char *id, bool copy_only) {
             if (active) {
-                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.00f, 0.68f, 0.26f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.00f, 0.68f, 0.26f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.00f, 0.68f, 0.26f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_Button,        tint(0.55f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tint(0.70f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  tint(0.70f));
             }
             std::string lbl = text;
             lbl.append("##").append(id);
@@ -1860,12 +1907,12 @@ void GizmoObjectManipulation::do_render_clipboard_window(ImGuiWrapper *imgui_wra
         };
         ImGui::SameLine();
         pick_button(apply_on, apply_on ? _u8L("Picking...") : _u8L("Pick apply"), "tc_pick_apply", false);
-        if (ImGui::IsItemHovered())
-            imgui_wrapper->tooltip(_L("Pick a donor object to copy its transform onto the selection"), ImGui::GetFontSize() * 20);
+        hover_tip(apply_on ? _L("Click an object to copy its transform onto the selection. Esc or right-click cancels.")
+                           : _L("Click another object to make the selected object match its transform"));
         ImGui::SameLine();
         pick_button(copy_on, copy_on ? _u8L("Picking...") : _u8L("Copy from"), "tc_pick_copy", true);
-        if (ImGui::IsItemHovered())
-            imgui_wrapper->tooltip(_L("Pick an object to copy its transform from into the clipboard"), ImGui::GetFontSize() * 20);
+        hover_tip(copy_on ? _L("Click an object to copy its transform. Alt-click copies just the part. Esc or right-click cancels.")
+                          : _L("Click an object to copy its transform into the clipboard without changing the selection"));
     }
 }
 
